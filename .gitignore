@@ -1,0 +1,14 @@
+venv
+env
+*/.DS_Store
+.DS_Store
+*/*.pyc
+*/__pycache__/*
+__pycache__/*.pyc
+*.pyc
+*.pyo
+*.pyd   
+.Python
+build/
+develop-eggs/
+dist/   
