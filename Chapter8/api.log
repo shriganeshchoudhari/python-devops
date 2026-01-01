@@ -1,0 +1,5 @@
+2026-01-01 16:29:10,329 - INFO - Status Code: 200
+2026-01-01 16:29:10,330 - INFO - Field current_user_url: https://api.github.com/user
+2026-01-01 16:29:25,405 - INFO - Status Code: 200
+2026-01-01 16:29:25,406 - INFO - Field current_user_url: https://api.github.com/user
+2026-01-01 16:29:40,044 - ERROR - API_TOKEN missing in environment
