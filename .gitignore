@@ -11,4 +11,6 @@ __pycache__/*.pyc
 .Python
 build/
 develop-eggs/
-dist/   
+dist/  
+.vscode/
+.eggs/ 
