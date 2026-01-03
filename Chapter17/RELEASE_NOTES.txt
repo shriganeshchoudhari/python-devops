@@ -1,9 +1,7 @@
 Branch: main
-Commit: af139b4159204208ed1cea4afb2ebbc6f8e78ccb
-
-Recent changes:
+Recent commits:
+6fb614d Add Chapter 17 content: Git Automation with Python, including assignments, solutions, and release notes generation
 af139b4 Add Chapter 16 content: CI/CD with Python, including assignment solutions and example scripts
 cea8d1b Add Chapter 15 content: Cloud Automation with Python (AWS + boto3), including detailed assignments and solutions
 66dc9e3 Add Chapter 14 content: Kubernetes Automation with Python, including detailed assignments and solutions
 67a6c1c Add Chapter 13 content: Docker Automation with Python, including comprehensive assignments and solutions
-3f19e8f Add Chapter 12 content: Configuration Files & Templates, including YAML and Jinja2 examples, assignments, and solutions
