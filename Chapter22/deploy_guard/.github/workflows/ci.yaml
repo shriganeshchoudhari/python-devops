@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install .[dev]
+
+      - name: Lint with Ruff
+        run: ruff check src tests
+
+      - name: Type check with mypy
+        run: mypy src/deploy_guard
+
+      - name: Run tests with coverage
+        run: pytest --cov=src/deploy_guard --cov-report=term-missing

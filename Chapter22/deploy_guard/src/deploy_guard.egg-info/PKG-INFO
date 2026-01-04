@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: deploy-guard
+Version: 0.1.0
+Summary: Pre-deploy guardrails and safe orchestrations
+Author: Ganesh
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: pre-commit; extra == "dev"
+Requires-Dist: requests; extra == "dev"
+Requires-Dist: psutil; extra == "dev"

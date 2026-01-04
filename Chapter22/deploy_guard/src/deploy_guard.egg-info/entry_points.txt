@@ -1,0 +1,2 @@
+[console_scripts]
+deploy-guard = deploy_guard.cli:main

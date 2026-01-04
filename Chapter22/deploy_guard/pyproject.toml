@@ -1,0 +1,14 @@
+[project]
+name = "deploy-guard"
+version = "0.1.0"
+description = "Pre-deploy guardrails and safe orchestrations"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ganesh" }]
+
+[project.scripts]
+deploy-guard = "deploy_guard.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "pre-commit", "requests", "psutil"]

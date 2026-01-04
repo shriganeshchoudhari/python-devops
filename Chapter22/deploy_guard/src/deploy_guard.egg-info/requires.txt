@@ -1,0 +1,9 @@
+
+[dev]
+pytest
+pytest-cov
+ruff
+mypy
+pre-commit
+requests
+psutil
