@@ -1642,3 +1642,153 @@ This is **portfolio-grade** and **interview-defensible**.
 * **Turn this into a reusable internal tool**
 
 Say what you want to extend next.
+Alright. **Next extension: CI integration.**
+If this tool doesn’t run in CI automatically, it’s just a local safety net. We’re fixing that.
+
+---
+
+![Image](https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2022/03/27/1-ArchitectureDiagram.png)
+
+![Image](https://distantjob.com/wp-content/uploads/2025/06/CI-CD-Pipeline-Stages-1024x440.png)
+
+![Image](https://www.neovasolutions.com/wp-content/uploads/2023/07/Create-CICD-pipeline-using-CircleCI-1024x576.png)
+
+# 🚀 EXTENSION 1 — GitHub Actions CI Gate for `release-sentinel`
+
+This turns your tool into a **hard release gate** that blocks merges/deploys when unsafe.
+
+---
+
+## 🎯 Objective
+
+* Run `release-sentinel` on every push/PR
+* Inject secrets via CI (never in repo)
+* Fail the workflow based on **exit codes**
+* Keep logs clean (no secret leaks)
+
+---
+
+## 📁 What You Add
+
+```
+.github/
+└── workflows/
+    └── release-sentinel.yml
+```
+
+---
+
+## 1️⃣ GitHub Actions Workflow (Minimal, Correct)
+
+### `.github/workflows/release-sentinel.yml`
+
+```yaml
+name: Release Sentinel Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tool
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run Release Sentinel
+        env:
+          RS_REQUIRED_PROCESS: python
+          RS_API_URL: https://api.github.com
+          RS_DEPLOY_TOKEN: ${{ secrets.RS_DEPLOY_TOKEN }}
+        run: |
+          release-sentinel --env dev --version v0.1.0
+```
+
+**Why this works**
+
+* Uses your **packaged CLI**
+* Secrets come from **GitHub Secrets**
+* Exit code controls job status
+* No shell hacks
+
+---
+
+## 2️⃣ Add the Secret (MANDATORY)
+
+In GitHub repo:
+
+* **Settings → Secrets and variables → Actions**
+* Add:
+
+  * `RS_DEPLOY_TOKEN` = any dummy value for now
+
+**Never** hardcode this. Ever.
+
+---
+
+## 3️⃣ Exit Code Semantics (CI Truth)
+
+* `0` → Job **passes**
+* `1` → Job **fails** (policy/config)
+* `2` → Job **fails** (critical runtime)
+
+GitHub Actions treats any non-zero as failure. That’s exactly what we want.
+
+---
+
+## 4️⃣ Make Version Dynamic (Next Improvement)
+
+Replace hardcoded version with Git tag when you’re ready:
+
+```yaml
+release-sentinel --env dev --version ${{ github.ref_name }}
+```
+
+But only after you’re tagging releases properly.
+
+---
+
+## 5️⃣ What This Immediately Gives You
+
+* Unsafe PRs are blocked
+* Missing config fails fast
+* System/API issues stop deploys
+* A visible, auditable safety gate
+
+This is **real DevOps behavior**.
+
+---
+
+## ✅ Exit Criteria for This Extension
+
+You’re done when:
+
+* Workflow runs on PR/push
+* Missing secret fails the job
+* Logs show **why** it failed
+* Secrets never appear in logs
+
+---
+
+## 🔜 What’s Next (Pick One)
+
+1️⃣ **Slack/Webhook alerts** on failure (notify humans)
+2️⃣ **GitHub Release tagging** after gate passes
+3️⃣ **Kubernetes Job wrapper** to run this in clusters
+4️⃣ **Performance hardening** (timeouts, caching)
+
+Reply with **one number only**.
