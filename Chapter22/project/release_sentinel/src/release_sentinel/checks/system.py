@@ -28,6 +28,7 @@ def check_memory() -> CheckResult:
 
 def check_process(name: str) -> CheckResult:
     for p in psutil.process_iter(["name"]):
-        if p.info["name"] == name:
-            return CheckResult(OK, f"Process OK: {name} running")
+        if p.info["name"] and p.info["name"].lower().startswith(name.lower()):
+            return CheckResult(OK, f"Process OK: {p.info['name']} running")
     return CheckResult(CRIT, f"Process CRITICAL: {name} not running")
+
