@@ -33,7 +33,7 @@ def run_checks(env: str, version: str) -> int:
         results = [
             check_disk(),
             check_memory(),
-            check_process("python"),
+            check_process("python.exe"),
             check_api("https://api.github.com"),
         ]
 
