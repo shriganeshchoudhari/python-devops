@@ -1398,3 +1398,247 @@ We will:
 3. Confirmation that secrets never appear in logs
 
 Paste raw output only.
+Good. **Phase 5 — final hardening.**
+Now we lock behavior with **tests + CI simulation**. If it’s not tested, it’s not real. Period.
+
+---
+
+![Image](https://www.tinybird.co/api/blog/images?file=posts%2F2023-07-07-data-driven-ci-pipeline-monitoring-with-pytest%2F64a724dcd9f4e8d78e58eb5b_pGqygYr9xq0BCn3U0pMRZ6UGzf4lreevE6EJZUJLSxwUSCjtJKzgjvr9bJoPgOIw9L8VD32_YsS5-0DXQ_8r3GUg3nRIr3hqkma55mBNe3xVgQdbSgPUoNSGJrlKGPzWo3L0bQLPLCK1gP_fj2hRr8M-11.png)
+
+![Image](https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2023/02/22/devops-2131-1.png)
+
+![Image](https://dancerscode.com/content/2019/ci-cd-pipeline.png)
+
+# 🚀 RELEASE-SENTINEL — PHASE 5
+
+**Tests & CI Simulation (Behavior Lock-In)**
+
+---
+
+## 🎯 Phase 5 Objective
+
+You will:
+
+* add **unit tests** for gates and checks
+* test **failure paths** explicitly
+* simulate **CI behavior** via exit codes
+* ensure **secrets never leak** to logs
+
+After this phase, regressions are **blocked by default**.
+
+---
+
+## 📁 Files You Will ADD / MODIFY
+
+```
+tests/
+├── test_env_gate.py
+├── test_config_gate.py
+├── test_system_checks.py
+├── test_api_check.py
+└── test_core_exit_codes.py
+```
+
+Install test deps (once):
+
+```bash
+pip install pytest pytest-mock
+```
+
+---
+
+## 1️⃣ Test: Environment Gate (Policy)
+
+### `tests/test_env_gate.py`
+
+```python
+import pytest
+from release_sentinel.checks.env import ensure_env_allowed
+
+def test_valid_envs():
+    for env in ("dev", "stage", "prod"):
+        ensure_env_allowed(env)
+
+def test_invalid_env_blocks():
+    with pytest.raises(RuntimeError):
+        ensure_env_allowed("production")
+```
+
+**Why:** Prevents typo-driven deploys. This must never regress.
+
+---
+
+## 2️⃣ Test: Config & Secrets Gate (Fail-Fast)
+
+### `tests/test_config_gate.py`
+
+```python
+import os
+import pytest
+from release_sentinel.checks.config import ensure_required_config
+
+def test_missing_env_vars_block(monkeypatch):
+    monkeypatch.delenv("RS_REQUIRED_PROCESS", raising=False)
+    monkeypatch.delenv("RS_API_URL", raising=False)
+    monkeypatch.delenv("RS_DEPLOY_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeError):
+        ensure_required_config()
+
+def test_required_env_vars_pass(monkeypatch):
+    monkeypatch.setenv("RS_REQUIRED_PROCESS", "python")
+    monkeypatch.setenv("RS_API_URL", "https://api.github.com")
+    monkeypatch.setenv("RS_DEPLOY_TOKEN", "secret")
+
+    cfg = ensure_required_config()
+    assert cfg["process"] == "python"
+    assert cfg["api_url"].startswith("https://")
+```
+
+**Why:** Missing secrets must **hard-fail** before any runtime checks.
+
+---
+
+## 3️⃣ Test: System Checks (Deterministic)
+
+### `tests/test_system_checks.py`
+
+```python
+from release_sentinel.checks.system import check_process
+from release_sentinel.checks.result import OK, CRIT
+
+def test_process_check_ok_for_running_process():
+    # Python test runner itself guarantees a python process exists
+    res = check_process("python")
+    assert res.status in (OK,)
+
+def test_process_check_crit_for_fake_process():
+    res = check_process("definitely_not_a_real_process_123")
+    assert res.status == CRIT
+```
+
+**Why:** Confirms **binary behavior** (running vs not running).
+
+---
+
+## 4️⃣ Test: API Health (Retries + Severity)
+
+### `tests/test_api_check.py`
+
+```python
+from release_sentinel.checks.api import check_api
+from release_sentinel.checks.result import OK, CRIT
+
+def test_api_ok():
+    res = check_api("https://api.github.com", retries=1)
+    assert res.status == OK
+
+def test_api_critical_on_bad_url():
+    res = check_api("http://127.0.0.1:9", retries=1)
+    assert res.status == CRIT
+```
+
+**Why:** One flaky call ≠ outage, but persistent failure **blocks releases**.
+
+---
+
+## 5️⃣ Test: Core Exit Codes (CI Semantics)
+
+### `tests/test_core_exit_codes.py`
+
+```python
+import pytest
+from release_sentinel.core import run_checks
+
+def test_core_blocks_on_missing_config(monkeypatch):
+    monkeypatch.delenv("RS_REQUIRED_PROCESS", raising=False)
+    monkeypatch.delenv("RS_API_URL", raising=False)
+    monkeypatch.delenv("RS_DEPLOY_TOKEN", raising=False)
+
+    code = run_checks(env="dev", version="v0.1.0")
+    assert code == 1
+```
+
+**Why:** CI must react differently to **policy failure (1)** vs **runtime critical (2)**.
+
+---
+
+## 6️⃣ CI Simulation (Local)
+
+### Simulate CI pass
+
+```bash
+set RS_REQUIRED_PROCESS=python
+set RS_API_URL=https://api.github.com
+set RS_DEPLOY_TOKEN=dummy
+pytest -q
+release-sentinel --env dev --version v0.1.0
+echo %ERRORLEVEL%
+```
+
+Expected:
+
+* tests pass
+* exit code `0` (or `2` if you force a critical)
+
+### Simulate CI block
+
+```bash
+set RS_REQUIRED_PROCESS=
+release-sentinel --env dev --version v0.1.0
+echo %ERRORLEVEL%
+```
+
+Expected:
+
+* exit code `1`
+* no secrets in logs
+
+---
+
+## 🔥 What This Phase Prevents
+
+* silent regressions
+* “worked yesterday” failures
+* accidental secret leaks
+* CI pipelines lying about safety
+
+This is the difference between **hope** and **guarantees**.
+
+---
+
+## ✅ Phase 5 Exit Criteria (FINAL)
+
+You’re done ONLY if:
+
+* `pytest` passes cleanly
+* missing config → exit `1`
+* runtime critical → exit `2`
+* success → exit `0`
+* logs never show secrets
+
+---
+
+## 🏁 CAPSTONE COMPLETE — WHAT YOU NOW HAVE
+
+You built a **real DevOps release gate** that:
+
+* enforces Git discipline
+* validates config & secrets
+* checks system & dependencies
+* survives flaky networks
+* integrates cleanly with CI
+* is structured, tested, and shippable
+
+This is **portfolio-grade** and **interview-defensible**.
+
+---
+
+### If you want next:
+
+* **Add GitHub Actions pipeline**
+* **Add Slack/Webhook alerts**
+* **Add Kubernetes job wrapper**
+* **Turn this into a reusable internal tool**
+
+Say what you want to extend next.
