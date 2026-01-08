@@ -1,0 +1,18 @@
+[project]
+name = "release-sentinel"
+version = "0.1.0"
+description = "Pre-release gate: environment, system, git, and API validations for CI/CD."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ganesh" }]
+
+[project.scripts]
+release-sentinel = "release_sentinel.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "pre-commit", "requests", "psutil"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
