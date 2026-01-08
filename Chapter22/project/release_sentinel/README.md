@@ -557,3 +557,844 @@ We’ll prevent deployments onto **unhealthy systems** and **downstream outages*
 No screenshots. No summaries. Raw output only.
 
 This is where your tool becomes **trustworthy**.
+Good. **Phase 3 starts now.**
+This is where `release-sentinel` stops caring only about *Git correctness* and starts caring about **reality**: system health and dependencies. If the system is unhealthy or a dependency is down, **deploying is irresponsible**.
+
+---
+
+![Image](https://images.squarespace-cdn.com/content/v1/62d0820c982c0c3ea18f1c93/691b1c48-cd29-45dc-bef2-75c184193f08/Releaseworks%2BDevOps%2BHealthcheck%2Bsystem.jpg)
+
+![Image](https://d2908q01vomqb2.cloudfront.net/5b384ce32d8cdef02bc3a139d4cac0a22bb029e8/2023/04/10/figure_3-1024x688.png)
+
+![Image](https://miro.medium.com/v2/resize%3Afit%3A1400/1%2ACEzSgYa0k_rqUrjBdpiUew.png)
+
+![Image](https://learn.microsoft.com/en-us/azure/architecture/patterns/_images/health-endpoint-monitoring-pattern.png)
+
+# 🚀 RELEASE-SENTINEL — PHASE 3
+
+**System & API Health Checks (Reality Gates)**
+
+---
+
+## 🎯 Phase 3 Objective
+
+Add **runtime safety gates** that block releases when:
+
+1. ❌ Disk is critically full
+2. ❌ Memory is critically exhausted
+3. ❌ A required process is not running
+4. ❌ A dependency API is unhealthy (with retries + timeouts)
+
+These are **CRITICAL gates**. If they fail, the exit code must be `2`.
+
+---
+
+## 📁 Files You Will ADD / MODIFY
+
+```
+src/release_sentinel/
+├── checks/
+│   ├── system.py   (NEW)
+│   ├── api.py      (NEW)
+│   └── result.py   (NEW)
+└── core.py         (MODIFY)
+```
+
+We’re separating **decision**, **checks**, and **severity** on purpose.
+
+---
+
+## 1️⃣ Result Model (STOP MIXING LOGIC)
+
+### `src/release_sentinel/checks/result.py`
+
+```python
+from dataclasses import dataclass
+
+OK = "OK"
+WARN = "WARN"
+CRIT = "CRIT"
+
+@dataclass
+class CheckResult:
+    status: str
+    message: str
+```
+
+**Why this exists**
+
+* Standardizes output across checks
+* Prevents ad-hoc booleans
+* Makes aggregation deterministic
+
+This is a *small* design choice with *big* long-term payoff.
+
+---
+
+## 2️⃣ System Health Checks (NO DEPLOY ON SICK HOST)
+
+### `src/release_sentinel/checks/system.py`
+
+```python
+import shutil
+import psutil
+from release_sentinel.checks.result import CheckResult, OK, WARN, CRIT
+
+DISK_WARN = 75
+DISK_CRIT = 85
+MEM_WARN = 70
+MEM_CRIT = 85
+
+def check_disk(path="/") -> CheckResult:
+    total, used, _ = shutil.disk_usage(path)
+    pct = (used / total) * 100
+
+    if pct >= DISK_CRIT:
+        return CheckResult(CRIT, f"Disk CRITICAL: {pct:.1f}%")
+    if pct >= DISK_WARN:
+        return CheckResult(WARN, f"Disk WARNING: {pct:.1f}%")
+    return CheckResult(OK, f"Disk OK: {pct:.1f}%")
+
+def check_memory() -> CheckResult:
+    pct = psutil.virtual_memory().percent
+
+    if pct >= MEM_CRIT:
+        return CheckResult(CRIT, f"Memory CRITICAL: {pct:.1f}%")
+    if pct >= MEM_WARN:
+        return CheckResult(WARN, f"Memory WARNING: {pct:.1f}%")
+    return CheckResult(OK, f"Memory OK: {pct:.1f}%")
+
+def check_process(name: str) -> CheckResult:
+    for p in psutil.process_iter(["name"]):
+        if p.info["name"] == name:
+            return CheckResult(OK, f"Process OK: {name} running")
+    return CheckResult(CRIT, f"Process CRITICAL: {name} not running")
+```
+
+**Hard truth**
+Deploying when disk or memory is critical is **self-sabotage**. This gate prevents that.
+
+---
+
+## 3️⃣ API Health Check (DON’T DEPLOY INTO OUTAGES)
+
+### `src/release_sentinel/checks/api.py`
+
+```python
+import time
+import requests
+from release_sentinel.checks.result import CheckResult, OK, CRIT
+
+RETRYABLE = {429, 500, 502, 503, 504}
+
+def check_api(url: str, timeout=3, retries=3) -> CheckResult:
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, timeout=timeout)
+            if r.status_code == 200:
+                return CheckResult(OK, f"API OK: {url}")
+
+            if r.status_code in RETRYABLE:
+                raise RuntimeError(f"Retryable {r.status_code}")
+
+            return CheckResult(
+                CRIT,
+                f"API CRITICAL: {url} returned {r.status_code}"
+            )
+
+        except Exception:
+            if attempt == retries - 1:
+                return CheckResult(
+                    CRIT,
+                    f"API CRITICAL: {url} unreachable"
+                )
+            time.sleep(2 ** attempt)
+```
+
+**Why retries are here**
+
+* APIs flake
+* Networks lie
+* One failure ≠ outage
+
+But after bounded retries → **block the release**.
+
+---
+
+## 4️⃣ Wire Health Checks into Core (CRITICAL PATH)
+
+### `src/release_sentinel/core.py` (MODIFY)
+
+```python
+import logging
+from release_sentinel.checks.git import (
+    ensure_git_repo,
+    ensure_clean_tree,
+    ensure_branch_allowed,
+    ensure_version_valid,
+    ensure_tag_not_exists,
+)
+from release_sentinel.checks.env import ensure_env_allowed
+from release_sentinel.checks.system import (
+    check_disk,
+    check_memory,
+    check_process,
+)
+from release_sentinel.checks.api import check_api
+from release_sentinel.checks.result import CRIT
+
+logger = logging.getLogger(__name__)
+
+def run_checks(env: str, version: str) -> int:
+    try:
+        logger.info("Starting release validation")
+
+        # Phase 2 gates
+        ensure_env_allowed(env)
+        ensure_git_repo()
+        ensure_clean_tree()
+        ensure_branch_allowed()
+        ensure_version_valid(version)
+        ensure_tag_not_exists(version)
+
+        # Phase 3 gates
+        results = [
+            check_disk(),
+            check_memory(),
+            check_process("python"),
+            check_api("https://api.github.com"),
+        ]
+
+        exit_code = 0
+        for r in results:
+            if r.status == CRIT:
+                logger.error(r.message)
+                exit_code = 2
+            else:
+                logger.info(r.message)
+
+        if exit_code == 0:
+            logger.info("Release validation PASSED")
+        else:
+            logger.error("Release BLOCKED: critical health check failed")
+
+        return exit_code
+
+    except Exception as e:
+        logger.error("Release BLOCKED: %s", e)
+        return 1
+```
+
+---
+
+## 5️⃣ Exit Code Semantics (DO NOT CHANGE)
+
+| Exit Code | Meaning                                   |
+| --------- | ----------------------------------------- |
+| `0`       | SAFE to deploy                            |
+| `1`       | BLOCKED (policy / config / git)           |
+| `2`       | CRITICAL (system or dependency unhealthy) |
+
+CI/CD systems **must** react differently to `1` vs `2`.
+
+---
+
+## ✅ What You Must Test (NO SKIPPING)
+
+### Passing run
+
+```bash
+release-sentinel --env dev --version v0.1.0
+```
+
+### Force a CRITICAL (example)
+
+* Kill the checked process
+* Or disconnect network
+* Or change API URL to invalid
+
+You must see:
+
+* CRITICAL log
+* exit code `2`
+
+---
+
+## ❌ What This Phase Prevents (REAL FAILURES)
+
+* Deploying on full disks
+* Deploying on dying nodes
+* Deploying when dependencies are down
+* “CI passed but prod exploded” incidents
+
+This is **why** release gates exist.
+
+---
+
+## 🔒 Next Phase (Locked Until This Works)
+
+➡ **Phase 4 — Secrets & Config Safety**
+We’ll:
+
+* enforce required secrets
+* prevent secret leaks
+* fail fast before deployment
+
+---
+
+### Your next reply must include:
+
+1. Output of a **successful run**
+2. Output of a **CRITICAL failure**
+3. Exit code shown for both
+
+No interpretation. Raw output.
+
+This is where your tool starts earning trust.
+Good. **Phase 3 starts now.**
+This is where `release-sentinel` stops caring only about *Git correctness* and starts caring about **reality**: system health and dependencies. If the system is unhealthy or a dependency is down, **deploying is irresponsible**.
+
+---
+
+![Image](https://images.squarespace-cdn.com/content/v1/62d0820c982c0c3ea18f1c93/691b1c48-cd29-45dc-bef2-75c184193f08/Releaseworks%2BDevOps%2BHealthcheck%2Bsystem.jpg)
+
+![Image](https://d2908q01vomqb2.cloudfront.net/5b384ce32d8cdef02bc3a139d4cac0a22bb029e8/2023/04/10/figure_3-1024x688.png)
+
+![Image](https://miro.medium.com/v2/resize%3Afit%3A1400/1%2ACEzSgYa0k_rqUrjBdpiUew.png)
+
+![Image](https://learn.microsoft.com/en-us/azure/architecture/patterns/_images/health-endpoint-monitoring-pattern.png)
+
+# 🚀 RELEASE-SENTINEL — PHASE 3
+
+**System & API Health Checks (Reality Gates)**
+
+---
+
+## 🎯 Phase 3 Objective
+
+Add **runtime safety gates** that block releases when:
+
+1. ❌ Disk is critically full
+2. ❌ Memory is critically exhausted
+3. ❌ A required process is not running
+4. ❌ A dependency API is unhealthy (with retries + timeouts)
+
+These are **CRITICAL gates**. If they fail, the exit code must be `2`.
+
+---
+
+## 📁 Files You Will ADD / MODIFY
+
+```
+src/release_sentinel/
+├── checks/
+│   ├── system.py   (NEW)
+│   ├── api.py      (NEW)
+│   └── result.py   (NEW)
+└── core.py         (MODIFY)
+```
+
+We’re separating **decision**, **checks**, and **severity** on purpose.
+
+---
+
+## 1️⃣ Result Model (STOP MIXING LOGIC)
+
+### `src/release_sentinel/checks/result.py`
+
+```python
+from dataclasses import dataclass
+
+OK = "OK"
+WARN = "WARN"
+CRIT = "CRIT"
+
+@dataclass
+class CheckResult:
+    status: str
+    message: str
+```
+
+**Why this exists**
+
+* Standardizes output across checks
+* Prevents ad-hoc booleans
+* Makes aggregation deterministic
+
+This is a *small* design choice with *big* long-term payoff.
+
+---
+
+## 2️⃣ System Health Checks (NO DEPLOY ON SICK HOST)
+
+### `src/release_sentinel/checks/system.py`
+
+```python
+import shutil
+import psutil
+from release_sentinel.checks.result import CheckResult, OK, WARN, CRIT
+
+DISK_WARN = 75
+DISK_CRIT = 85
+MEM_WARN = 70
+MEM_CRIT = 85
+
+def check_disk(path="/") -> CheckResult:
+    total, used, _ = shutil.disk_usage(path)
+    pct = (used / total) * 100
+
+    if pct >= DISK_CRIT:
+        return CheckResult(CRIT, f"Disk CRITICAL: {pct:.1f}%")
+    if pct >= DISK_WARN:
+        return CheckResult(WARN, f"Disk WARNING: {pct:.1f}%")
+    return CheckResult(OK, f"Disk OK: {pct:.1f}%")
+
+def check_memory() -> CheckResult:
+    pct = psutil.virtual_memory().percent
+
+    if pct >= MEM_CRIT:
+        return CheckResult(CRIT, f"Memory CRITICAL: {pct:.1f}%")
+    if pct >= MEM_WARN:
+        return CheckResult(WARN, f"Memory WARNING: {pct:.1f}%")
+    return CheckResult(OK, f"Memory OK: {pct:.1f}%")
+
+def check_process(name: str) -> CheckResult:
+    for p in psutil.process_iter(["name"]):
+        if p.info["name"] == name:
+            return CheckResult(OK, f"Process OK: {name} running")
+    return CheckResult(CRIT, f"Process CRITICAL: {name} not running")
+```
+
+**Hard truth**
+Deploying when disk or memory is critical is **self-sabotage**. This gate prevents that.
+
+---
+
+## 3️⃣ API Health Check (DON’T DEPLOY INTO OUTAGES)
+
+### `src/release_sentinel/checks/api.py`
+
+```python
+import time
+import requests
+from release_sentinel.checks.result import CheckResult, OK, CRIT
+
+RETRYABLE = {429, 500, 502, 503, 504}
+
+def check_api(url: str, timeout=3, retries=3) -> CheckResult:
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, timeout=timeout)
+            if r.status_code == 200:
+                return CheckResult(OK, f"API OK: {url}")
+
+            if r.status_code in RETRYABLE:
+                raise RuntimeError(f"Retryable {r.status_code}")
+
+            return CheckResult(
+                CRIT,
+                f"API CRITICAL: {url} returned {r.status_code}"
+            )
+
+        except Exception:
+            if attempt == retries - 1:
+                return CheckResult(
+                    CRIT,
+                    f"API CRITICAL: {url} unreachable"
+                )
+            time.sleep(2 ** attempt)
+```
+
+**Why retries are here**
+
+* APIs flake
+* Networks lie
+* One failure ≠ outage
+
+But after bounded retries → **block the release**.
+
+---
+
+## 4️⃣ Wire Health Checks into Core (CRITICAL PATH)
+
+### `src/release_sentinel/core.py` (MODIFY)
+
+```python
+import logging
+from release_sentinel.checks.git import (
+    ensure_git_repo,
+    ensure_clean_tree,
+    ensure_branch_allowed,
+    ensure_version_valid,
+    ensure_tag_not_exists,
+)
+from release_sentinel.checks.env import ensure_env_allowed
+from release_sentinel.checks.system import (
+    check_disk,
+    check_memory,
+    check_process,
+)
+from release_sentinel.checks.api import check_api
+from release_sentinel.checks.result import CRIT
+
+logger = logging.getLogger(__name__)
+
+def run_checks(env: str, version: str) -> int:
+    try:
+        logger.info("Starting release validation")
+
+        # Phase 2 gates
+        ensure_env_allowed(env)
+        ensure_git_repo()
+        ensure_clean_tree()
+        ensure_branch_allowed()
+        ensure_version_valid(version)
+        ensure_tag_not_exists(version)
+
+        # Phase 3 gates
+        results = [
+            check_disk(),
+            check_memory(),
+            check_process("python"),
+            check_api("https://api.github.com"),
+        ]
+
+        exit_code = 0
+        for r in results:
+            if r.status == CRIT:
+                logger.error(r.message)
+                exit_code = 2
+            else:
+                logger.info(r.message)
+
+        if exit_code == 0:
+            logger.info("Release validation PASSED")
+        else:
+            logger.error("Release BLOCKED: critical health check failed")
+
+        return exit_code
+
+    except Exception as e:
+        logger.error("Release BLOCKED: %s", e)
+        return 1
+```
+
+---
+
+## 5️⃣ Exit Code Semantics (DO NOT CHANGE)
+
+| Exit Code | Meaning                                   |
+| --------- | ----------------------------------------- |
+| `0`       | SAFE to deploy                            |
+| `1`       | BLOCKED (policy / config / git)           |
+| `2`       | CRITICAL (system or dependency unhealthy) |
+
+CI/CD systems **must** react differently to `1` vs `2`.
+
+---
+
+## ✅ What You Must Test (NO SKIPPING)
+
+### Passing run
+
+```bash
+release-sentinel --env dev --version v0.1.0
+```
+
+### Force a CRITICAL (example)
+
+* Kill the checked process
+* Or disconnect network
+* Or change API URL to invalid
+
+You must see:
+
+* CRITICAL log
+* exit code `2`
+
+---
+
+## ❌ What This Phase Prevents (REAL FAILURES)
+
+* Deploying on full disks
+* Deploying on dying nodes
+* Deploying when dependencies are down
+* “CI passed but prod exploded” incidents
+
+This is **why** release gates exist.
+
+---
+
+## 🔒 Next Phase (Locked Until This Works)
+
+➡ **Phase 4 — Secrets & Config Safety**
+We’ll:
+
+* enforce required secrets
+* prevent secret leaks
+* fail fast before deployment
+
+---
+
+### Your next reply must include:
+
+1. Output of a **successful run**
+2. Output of a **CRITICAL failure**
+3. Exit code shown for both
+
+No interpretation. Raw output.
+
+This is where your tool starts earning trust.
+Alright. **Phase 4.**
+Now we stop trusting defaults and start enforcing **secrets + config discipline**. This is where tools usually leak credentials or behave unpredictably. We won’t.
+
+---
+
+![Image](https://d2908q01vomqb2.cloudfront.net/22d200f8670dbdb3e253a90eee5098477c95c23d/2023/11/27/img1-15.png)
+
+![Image](https://www.atlassian.com/blog/wp-content/uploads/2024/11/pipeline-predefined-variables-1.png)
+
+![Image](https://learn.microsoft.com/en-us/security/zero-trust/media/develop/secure-devops-environments/diagram-enterprise-devops-overview-expanded.png)
+
+# 🚀 RELEASE-SENTINEL — PHASE 4
+
+**Secrets & Configuration Safety (Fail-Fast Gates)**
+
+---
+
+## 🎯 Phase 4 Objective
+
+Your tool must **refuse to run** unless:
+
+* required environment variables are present
+* secrets are loaded securely
+* nothing sensitive is logged
+* config is explicit, not hardcoded
+
+If config is wrong → **block early**.
+If secrets are missing → **fail immediately**.
+
+No guessing. No defaults for secrets.
+
+---
+
+## 📁 Files You Will ADD / MODIFY
+
+```
+src/release_sentinel/
+├── checks/
+│   └── config.py   (NEW)
+├── config.py       (MODIFY)
+└── core.py         (MODIFY)
+```
+
+We separate **policy checks** from **config loading**.
+
+---
+
+## 1️⃣ Define Required Config & Secrets
+
+### What we will enforce (example, realistic)
+
+* `RS_REQUIRED_PROCESS` → process name to check
+* `RS_API_URL` → dependency API
+* `RS_DEPLOY_TOKEN` → secret token (simulated for now)
+
+These are **runtime requirements**, not code constants.
+
+---
+
+## 2️⃣ Config Check Gate (NEW)
+
+### `src/release_sentinel/checks/config.py`
+
+```python
+import logging
+from release_sentinel.config import get_env
+
+logger = logging.getLogger(__name__)
+
+def ensure_required_config():
+    process = get_env("RS_REQUIRED_PROCESS", required=True)
+    api_url = get_env("RS_API_URL", required=True)
+    token = get_env("RS_DEPLOY_TOKEN", required=True)
+
+    # NEVER log secrets
+    logger.info("Config OK: process=%s, api_url=%s", process, api_url)
+
+    return {
+        "process": process,
+        "api_url": api_url,
+        "token": token,  # used later, not logged
+    }
+```
+
+### Why this design is correct
+
+* Secrets come from env only
+* `required=True` enforces fail-fast
+* Token is returned but **never logged**
+* Config logic is centralized
+
+If this fails, deployment must not proceed.
+
+---
+
+## 3️⃣ Update Core to Enforce Config Gate
+
+### `src/release_sentinel/core.py` (MODIFY)
+
+```python
+import logging
+from release_sentinel.checks.git import (
+    ensure_git_repo,
+    ensure_clean_tree,
+    ensure_branch_allowed,
+    ensure_version_valid,
+    ensure_tag_not_exists,
+)
+from release_sentinel.checks.env import ensure_env_allowed
+from release_sentinel.checks.config import ensure_required_config
+from release_sentinel.checks.system import (
+    check_disk,
+    check_memory,
+    check_process,
+)
+from release_sentinel.checks.api import check_api
+from release_sentinel.checks.result import CRIT
+
+logger = logging.getLogger(__name__)
+
+def run_checks(env: str, version: str) -> int:
+    try:
+        logger.info("Starting release validation")
+
+        # Phase 2 — policy gates
+        ensure_env_allowed(env)
+        ensure_git_repo()
+        ensure_clean_tree()
+        ensure_branch_allowed()
+        ensure_version_valid(version)
+        ensure_tag_not_exists(version)
+
+        # Phase 4 — config & secrets gate
+        cfg = ensure_required_config()
+
+        # Phase 3 — health gates (now config-driven)
+        results = [
+            check_disk(),
+            check_memory(),
+            check_process(cfg["process"]),
+            check_api(cfg["api_url"]),
+        ]
+
+        exit_code = 0
+        for r in results:
+            if r.status == CRIT:
+                logger.error(r.message)
+                exit_code = 2
+            else:
+                logger.info(r.message)
+
+        if exit_code == 0:
+            logger.info("Release validation PASSED")
+        else:
+            logger.error("Release BLOCKED: critical health check failed")
+
+        return exit_code
+
+    except Exception as e:
+        logger.error("Release BLOCKED: %s", e)
+        return 1
+```
+
+### What changed (important)
+
+* **No hardcoded process name**
+* **No hardcoded API URL**
+* Secrets/config enforced **before** health checks
+* Missing config → exit `1` (policy failure)
+
+---
+
+## 4️⃣ How You MUST Run It Now
+
+### ❌ Without env vars (INTENTIONAL FAILURE)
+
+```bash
+release-sentinel --env dev --version v0.1.0
+```
+
+Expected:
+
+```
+ERROR Release BLOCKED: Missing required env var: RS_REQUIRED_PROCESS
+```
+
+Exit code: `1`
+
+---
+
+### ✅ With env vars (SUCCESS CASE)
+
+**Windows (PowerShell / CMD)**
+
+```bat
+set RS_REQUIRED_PROCESS=python
+set RS_API_URL=https://api.github.com
+set RS_DEPLOY_TOKEN=dummy-secret
+release-sentinel --env dev --version v0.1.0
+```
+
+Expected:
+
+* Config OK (no secret logged)
+* System + API checks run
+* Exit code `0` or `2` depending on health
+
+---
+
+## 🔥 What This Phase Prevents (REAL INCIDENTS)
+
+* Deploying with missing secrets
+* Hardcoded prod values
+* Accidental secret leaks in logs
+* “It worked on my machine” configs
+* CI pipelines running half-configured
+
+Most outages start here. Yours won’t.
+
+---
+
+## ✅ Phase 4 Exit Criteria (STRICT)
+
+You move on ONLY if:
+
+* Missing env vars block execution
+* Secrets are never logged
+* Health checks use env-driven config
+* Exit code `1` for config errors
+* Exit code `2` for runtime criticals
+
+---
+
+## 🔒 Next Phase (FINAL)
+
+➡ **Phase 5 — Tests & CI Simulation**
+
+We will:
+
+* add unit tests for checks
+* test failure paths
+* simulate CI behavior
+* lock behavior with tests
+
+---
+
+### Your next reply must include:
+
+1. Output when env vars are **missing**
+2. Output when env vars are **present**
+3. Confirmation that secrets never appear in logs
+
+Paste raw output only.

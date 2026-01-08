@@ -7,6 +7,7 @@ from release_sentinel.checks.git import (
     ensure_tag_not_exists,
 )
 from release_sentinel.checks.env import ensure_env_allowed
+from release_sentinel.checks.config import ensure_required_config
 from release_sentinel.checks.system import (
     check_disk,
     check_memory,
@@ -21,7 +22,7 @@ def run_checks(env: str, version: str) -> int:
     try:
         logger.info("Starting release validation")
 
-        # Phase 2 gates
+        # Phase 2 — policy gates
         ensure_env_allowed(env)
         ensure_git_repo()
         ensure_clean_tree()
@@ -29,12 +30,15 @@ def run_checks(env: str, version: str) -> int:
         ensure_version_valid(version)
         ensure_tag_not_exists(version)
 
-        # Phase 3 gates
+        # Phase 4 — config & secrets gate
+        cfg = ensure_required_config()
+
+        # Phase 3 — health gates (now config-driven)
         results = [
             check_disk(),
             check_memory(),
-            check_process("python"),
-            check_api("https://api.github.com"),
+            check_process(cfg["process"]),
+            check_api(cfg["api_url"]),
         ]
 
         exit_code = 0
