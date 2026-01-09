@@ -15,6 +15,7 @@ from release_sentinel.checks.system import (
 )
 from release_sentinel.checks.api import check_api
 from release_sentinel.checks.result import CRIT
+from release_sentinel.alerts.webhook import send_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,13 @@ def run_checks(env: str, version: str) -> int:
         if exit_code == 0:
             logger.info("Release validation PASSED")
         else:
-            logger.error("Release BLOCKED: critical health check failed")
-
+            msg = "Release BLOCKED (CRITICAL): system or dependency unhealthy"
+            logger.error(msg)
+            send_webhook(msg, severity="CRITICAL")
         return exit_code
 
     except Exception as e:
-        logger.error("Release BLOCKED: %s", e)
+        msg = f"Release BLOCKED (policy): {e}"
+        logger.error(msg)
+        send_webhook(msg, severity="BLOCKED")
         return 1

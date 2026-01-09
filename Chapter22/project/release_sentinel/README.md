@@ -1792,3 +1792,265 @@ You’re done when:
 4️⃣ **Performance hardening** (timeouts, caching)
 
 Reply with **one number only**.
+Alright. We move forward **without hand-holding**.
+Next extension = **1️⃣ Slack/Webhook alerts on failure**. This is the logical next step: **humans must be notified when the gate blocks a release**.
+
+---
+
+![Image](https://learn.microsoft.com/en-us/azure/devops/service-hooks/services/media/slack/incoming-webhook.png?view=azure-devops)
+
+![Image](https://knowledge.informatica.com/servlet/rtaImage?eid=ka0VM000000W1oz\&feoid=00N3f000000ZgGS\&refid=0EM3f000001EGJt)
+
+![Image](https://miro.medium.com/v2/resize%3Afit%3A1400/1%2ACL6_xX5PxDrXUleVGlvO1w.jpeg)
+
+# 🚀 EXTENSION 2 — Failure Alerts (Slack/Webhook)
+
+Right now your tool:
+
+* blocks unsafe releases ✅
+* exits correctly for CI ✅
+
+What it **does NOT** do yet:
+
+* notify humans ❌
+
+Silent failures are how blocked releases get ignored.
+
+---
+
+## 🎯 Objective
+
+When `release-sentinel`:
+
+* exits with **1 or 2**
+* running in CI or prod context
+
+👉 Send a **Slack/Webhook alert** with:
+
+* environment
+* version
+* failure reason
+* severity
+
+No alerts on success.
+No secrets in payloads.
+No retries storms.
+
+---
+
+## 1️⃣ Add Alert Check Module
+
+### 📁 New file
+
+```
+src/release_sentinel/alerts/webhook.py
+```
+
+### `alerts/webhook.py`
+
+```python
+import os
+import logging
+import requests
+
+logger = logging.getLogger(__name__)
+
+def send_webhook(message: str, severity: str):
+    webhook_url = os.getenv("RS_ALERT_WEBHOOK")
+
+    if not webhook_url:
+        logger.info("No webhook configured, skipping alert")
+        return
+
+    payload = {
+        "text": f":rotating_light: Release Sentinel Alert\n"
+                f"*Severity:* {severity}\n"
+                f"*Message:* {message}"
+    }
+
+    try:
+        r = requests.post(
+            webhook_url,
+            json=payload,
+            timeout=3
+        )
+        r.raise_for_status()
+        logger.info("Alert sent successfully")
+    except Exception as e:
+        # NEVER fail the pipeline because alerting failed
+        logger.error("Failed to send alert: %s", e)
+```
+
+### Why this design is correct
+
+* Webhook URL from env (never code)
+* Alert failure does **NOT** block CI
+* Timeout enforced
+* No secret leakage
+
+Alerting must be **best-effort**, not destructive.
+
+---
+
+## 2️⃣ Wire Alerts into Core (ONLY ON FAILURE)
+
+### Modify `core.py`
+
+Add import:
+
+```python
+from release_sentinel.alerts.webhook import send_webhook
+```
+
+Then update failure paths:
+
+### 🔴 Policy / Config failure
+
+```python
+except Exception as e:
+    msg = f"Release BLOCKED (policy): {e}"
+    logger.error(msg)
+    send_webhook(msg, severity="BLOCKED")
+    return 1
+```
+
+### 🔴 Runtime CRITICAL failure
+
+Replace this block:
+
+```python
+if exit_code == 0:
+    logger.info("Release validation PASSED")
+else:
+    logger.error("Release BLOCKED: critical health check failed")
+```
+
+With:
+
+```python
+if exit_code == 0:
+    logger.info("Release validation PASSED")
+else:
+    msg = "Release BLOCKED (CRITICAL): system or dependency unhealthy"
+    logger.error(msg)
+    send_webhook(msg, severity="CRITICAL")
+```
+
+### Why alerts are here (not in checks)
+
+* Core knows **context**
+* Checks only detect
+* Core decides **who gets woken up**
+
+That separation matters.
+
+---
+
+## 3️⃣ Configure Slack Webhook (CI or Local)
+
+### Slack side
+
+* Create **Incoming Webhook**
+* Copy webhook URL
+
+### Local test (Windows)
+
+```bat
+set RS_ALERT_WEBHOOK=https://hooks.slack.com/services/XXX/YYY/ZZZ
+```
+
+### GitHub Actions
+
+Add secret suggestively named:
+
+```
+RS_ALERT_WEBHOOK
+```
+
+And inject it:
+
+```yaml
+env:
+  RS_ALERT_WEBHOOK: ${{ secrets.RS_ALERT_WEBHOOK }}
+```
+
+---
+
+## 4️⃣ What You MUST Test
+
+### ❌ Trigger a policy failure
+
+```bash
+set RS_REQUIRED_PROCESS=
+release-sentinel --env dev --version v0.1.0
+```
+
+Expected:
+
+* exit code `1`
+* Slack alert sent
+* message includes “BLOCKED (policy)”
+
+---
+
+### ❌ Trigger a CRITICAL failure
+
+* stop required process
+* or break API URL
+
+Expected:
+
+* exit code `2`
+* Slack alert sent
+* message includes “CRITICAL”
+
+---
+
+### ✅ Success case
+
+```bash
+release-sentinel --env dev --version v0.1.0
+```
+
+Expected:
+
+* exit code `0`
+* **NO alert**
+
+If success alerts fire → your system is noisy and wrong.
+
+---
+
+## 🔥 Hard Rule (Memorize This)
+
+> **Failures alert humans.
+> Successes stay quiet.**
+
+Anything else causes alert fatigue.
+
+---
+
+## ✅ Extension Status
+
+| Capability         | Status         |
+| ------------------ | -------------- |
+| CI gate            | ✅              |
+| Exit codes         | ✅              |
+| Secrets discipline | ✅              |
+| Human notification | ✅ (after this) |
+
+You now have a **complete release safety system**.
+
+---
+
+## 🔜 Next Options (FINAL SET)
+
+Pick **one number only**:
+
+1️⃣ **Automatic Git tag + GitHub Release after gate passes**
+2️⃣ **Run `release-sentinel` as a Kubernetes Job**
+3️⃣ **Parallelize checks for speed**
+4️⃣ **Convert this into a reusable internal Python package**
+
+No rushing.
+Each of these is real-world senior-level work.

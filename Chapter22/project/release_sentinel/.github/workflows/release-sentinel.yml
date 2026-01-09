@@ -29,5 +29,6 @@ jobs:
           RS_REQUIRED_PROCESS: python
           RS_API_URL: https://api.github.com
           RS_DEPLOY_TOKEN: ${{ secrets.RS_DEPLOY_TOKEN }}
+          RS_ALERT_WEBHOOK: ${{ secrets.RS_ALERT_WEBHOOK }}
         run: |
           release-sentinel --env dev --version  ${{ github.ref_name }}
