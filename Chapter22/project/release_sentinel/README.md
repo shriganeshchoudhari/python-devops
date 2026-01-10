@@ -2333,3 +2333,167 @@ Pick **one** when ready:
 
 You’re no longer “learning”.
 You’re **operating at production level**.
+Alright. We’re moving forward **without backtracking**.
+
+## 🚀 NEXT — **Automatic Release Notes from Git History**
+
+This makes your releases **explain themselves**. No more “what changed?” after the fact.
+
+---
+
+![Image](https://user-images.githubusercontent.com/21085292/69079766-76b11b80-0a19-11ea-8109-cd648e4dcb68.png)
+
+![Image](https://www.freecodecamp.org/news/content/images/2020/07/generate-changelog-example.png)
+
+![Image](https://miro.medium.com/v2/resize%3Afit%3A1400/0%2AY43oRhZaHLFGceG5.png)
+
+# EXTENSION 4 — Release Notes (Deterministic, Automatic)
+
+### What this adds
+
+When the gate passes and a release is created:
+
+1. Collect commits since the previous tag
+2. Generate clean release notes
+3. Attach them to the GitHub Release
+4. Zero manual editing
+
+---
+
+## 1️⃣ Add a Release Notes Module
+
+**New files**
+
+```
+src/release_sentinel/release/
+├── notes.py
+```
+
+### `release/notes.py`
+
+```python
+import subprocess
+
+def _run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+def get_previous_tag():
+    res = _run(["git", "describe", "--tags", "--abbrev=0"])
+    return res.stdout.strip() if res.returncode == 0 else None
+
+def generate_notes(version: str) -> str:
+    prev = get_previous_tag()
+    if prev:
+        log = _run([
+            "git", "log",
+            f"{prev}..HEAD",
+            "--pretty=format:- %h %s"
+        ]).stdout
+    else:
+        log = _run([
+            "git", "log",
+            "--pretty=format:- %h %s"
+        ]).stdout
+
+    header = f"## Changes in {version}\n"
+    return header + (log.strip() or "- Initial release")
+```
+
+**Why this is right**
+
+* Uses Git as the source of truth
+* Idempotent (same inputs → same notes)
+* Handles first release cleanly
+
+---
+
+## 2️⃣ Attach Notes to GitHub Release
+
+Update **`release/github.py`** to accept notes:
+
+```python
+def create_github_release(version: str, body: str):
+    # ... existing code ...
+    payload = {
+        "tag_name": version,
+        "name": version,
+        "body": body,
+        "draft": False,
+        "prerelease": False
+    }
+```
+
+---
+
+## 3️⃣ Wire Notes into Core (SUCCESS PATH ONLY)
+
+In **`core.py`**, import and use notes:
+
+```python
+from release_sentinel.release.notes import generate_notes
+```
+
+Replace the success block:
+
+```python
+logger.info("Release validation PASSED")
+
+notes = generate_notes(version)
+create_and_push_tag(version)
+create_github_release(version, notes)
+
+logger.info("Release %s completed successfully", version)
+```
+
+**Rules respected**
+
+* Notes generated **only after gate passes**
+* Notes reflect **exactly what shipped**
+* No retries, no guessing
+
+---
+
+## 4️⃣ What You MUST Test
+
+### First release
+
+* No previous tag
+* Notes include full history
+* GitHub Release shows notes
+
+### Subsequent release
+
+* Notes include commits since last tag
+* No duplicate entries
+* Clean formatting
+
+---
+
+## 🔥 Why This Is Senior-Level
+
+Most teams:
+
+* forget to write notes
+* write them late
+* write them wrong
+
+You now have:
+
+* **deterministic release notes**
+* **zero human dependency**
+* **perfect audit trail**
+
+This closes the loop: **gate → release → explanation**.
+
+---
+
+## What’s Next (Last Set)
+
+Pick **one**:
+
+1️⃣ **Kubernetes Job wrapper** (run inside clusters)
+2️⃣ **Parallelize checks** (speed up CI)
+3️⃣ **Template this repo for reuse**
+4️⃣ **Rollback safety & verification**
+
+Reply with **one number only**.
