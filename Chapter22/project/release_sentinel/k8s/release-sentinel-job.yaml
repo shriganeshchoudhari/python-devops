@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: release-sentinel
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: release-sentinel
+          image: yourrepo/release-sentinel:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--env=prod"
+            - "--version=v0.1.0"
+          env:
+            - name: RS_SKIP_GIT_CHECKS
+              value: "true"
+            - name: RS_METRICS_DIR
+              value: /metrics
+            - name: RS_REQUIRED_PROCESS
+              value: "python"
+            - name: RS_API_URL
+              value: "https://api.github.com"
+            - name: RS_DEPLOY_TOKEN
+              volumeMounts:
+            - name: metrics
+              mountPath: /metrics
+              volumes:
+            - name: metrics
+              emptyDir: {}
+              valueFrom:
+                secretKeyRef:
+                  name: release-sentinel-secrets
+                  key: deploy-token
+            - name: RS_ALERT_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: release-sentinel-secrets
+                  key: slack-webhook
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: GITHUB_REPOSITORY
+              value: "yourorg/yourrepo"

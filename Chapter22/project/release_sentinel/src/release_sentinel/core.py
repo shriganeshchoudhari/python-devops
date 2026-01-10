@@ -1,4 +1,5 @@
 import logging
+import os
 
 from release_sentinel.checks.git import (
     ensure_git_repo,
@@ -20,6 +21,8 @@ from release_sentinel.checks.result import CRIT
 from release_sentinel.alerts.webhook import send_webhook
 from release_sentinel.release.git import create_and_push_tag
 from release_sentinel.release.github import create_github_release
+from release_sentinel.release.notes import generate_notes
+from release_sentinel.metrics import write_metric
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,7 @@ logger = logging.getLogger(__name__)
 def run_checks(env: str, version: str) -> int:
     """
     Exit codes:
-      0 = SAFE (release created)
+      0 = SAFE
       1 = BLOCKED (policy/config failure)
       2 = CRITICAL (runtime health failure)
     """
@@ -35,22 +38,31 @@ def run_checks(env: str, version: str) -> int:
         logger.info("Starting release validation")
 
         # -------------------------
-        # Phase 2 — Policy gates
+        # Environment policy
         # -------------------------
         ensure_env_allowed(env)
-        ensure_git_repo()
-        ensure_clean_tree()
-        ensure_branch_allowed()
-        ensure_version_valid(version)
-        ensure_tag_not_exists(version)
+
+        skip_git = os.getenv("RS_SKIP_GIT_CHECKS", "").lower() == "true"
 
         # -------------------------
-        # Phase 4 — Config & secrets
+        # Git policy checks (CI / local)
+        # -------------------------
+        if not skip_git:
+            ensure_git_repo()
+            ensure_clean_tree()
+            ensure_branch_allowed()
+            ensure_version_valid(version)
+            ensure_tag_not_exists(version)
+        else:
+            logger.info("Skipping Git checks (runtime environment)")
+
+        # -------------------------
+        # Config & secrets
         # -------------------------
         cfg = ensure_required_config()
 
         # -------------------------
-        # Phase 3 — Runtime health
+        # Runtime health checks
         # -------------------------
         results = [
             check_disk(),
@@ -60,34 +72,60 @@ def run_checks(env: str, version: str) -> int:
         ]
 
         exit_code = 0
-
-        for result in results:
-            if result.status == CRIT:
-                logger.error(result.message)
+        for r in results:
+            if r.status == CRIT:
+                logger.error(r.message)
                 exit_code = 2
             else:
-                logger.info(result.message)
+                logger.info(r.message)
 
-        if exit_code != 0:
+        # -------------------------
+        # CRITICAL failure path
+        # -------------------------
+        if exit_code == 2:
             msg = "Release BLOCKED (CRITICAL): system or dependency unhealthy"
             logger.error(msg)
             send_webhook(msg, severity="CRITICAL")
-            return exit_code
+
+            write_metric(
+                "release_sentinel_status",
+                0,
+                {"result": "critical", "env": env}
+            )
+            return 2
 
         # -------------------------
-        # SUCCESS — Release allowed
+        # SUCCESS path
         # -------------------------
         logger.info("Release validation PASSED")
 
-        # These MUST fail hard if they fail
-        create_and_push_tag(version)
-        create_github_release(version)
+        write_metric(
+            "release_sentinel_status",
+            1,
+            {"result": "safe", "env": env}
+        )
 
-        logger.info("Release %s completed successfully", version)
+        # Release actions ONLY where Git context exists (CI)
+        if not skip_git:
+            notes = generate_notes(version)
+            create_and_push_tag(version)
+            create_github_release(version, notes)
+        else:
+            logger.info("Skipping release creation (runtime mode)")
+
         return 0
 
+    # -------------------------
+    # POLICY / CONFIG failure
+    # -------------------------
     except Exception as e:
         msg = f"Release BLOCKED (policy): {e}"
         logger.error(msg)
         send_webhook(msg, severity="BLOCKED")
+
+        write_metric(
+            "release_sentinel_status",
+            0,
+            {"result": "blocked", "env": env}
+        )
         return 1
