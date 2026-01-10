@@ -2054,3 +2054,282 @@ Pick **one number only**:
 
 No rushing.
 Each of these is real-world senior-level work.
+Alright. **We move to the next extension.**
+This one turns `release-sentinel` from a *gate* into a *release orchestrator*.
+
+---
+
+![Image](https://riggaroo.dev/wp-content/uploads/2020/10/Release-Process-Android.003-1024x576.jpeg)
+
+![Image](https://montemagno.com/content/images/2019/01/Pipeline.png)
+
+![Image](https://substackcdn.com/image/fetch/%24s_%21dgbK%21%2Cf_auto%2Cq_auto%3Agood%2Cfl_progressive%3Asteep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F1f968b06-e00e-4e5e-8c8e-17150bea1054_3777x2859.png)
+
+# 🚀 EXTENSION 3 — Automatic Git Tag & GitHub Release
+
+**(Only After Gate Passes)**
+
+No more humans creating tags by hand.
+No more “did we release this already?”.
+If the gate passes → tag + release happen. If it fails → nothing happens.
+
+---
+
+## 🎯 Objective
+
+After **all checks pass (exit code 0)**:
+
+1. Create a **Git tag** (`vX.Y.Z`)
+2. Push the tag to origin
+3. Create a **GitHub Release**
+4. Do **nothing** on WARN
+5. Do **nothing** on BLOCKED / CRITICAL
+
+This must be **idempotent** and **safe**.
+
+---
+
+## 🔒 Hard Rules (Non-Negotiable)
+
+* ❌ Never tag if gate fails
+* ❌ Never overwrite existing tags
+* ❌ Never log tokens
+* ❌ Never retry tagging blindly
+* ✅ Use GitHub token from env
+* ✅ Fail loudly if tagging/release fails
+
+---
+
+## 📁 Files You Will ADD
+
+```
+src/release_sentinel/
+├── release/
+│   ├── __init__.py
+│   ├── git.py
+│   └── github.py
+```
+
+Yes, `__init__.py` is required. You already learned why.
+
+---
+
+## 1️⃣ Git Tagging Logic (SAFE + IDEMPOTENT)
+
+### `src/release_sentinel/release/git.py`
+
+```python
+import subprocess
+import logging
+
+logger = logging.getLogger(__name__)
+
+def _run(cmd):
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True
+    )
+
+def create_and_push_tag(version: str):
+    # Check if tag already exists (idempotency)
+    tags = _run(["git", "tag"]).stdout.splitlines()
+    if version in tags:
+        raise RuntimeError(f"Tag already exists: {version}")
+
+    # Create annotated tag
+    res = _run([
+        "git", "tag", "-a", version, "-m", f"Release {version}"
+    ])
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip())
+
+    # Push tag
+    res = _run(["git", "push", "origin", version])
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip())
+
+    logger.info("Git tag %s created and pushed", version)
+```
+
+### Why this is correct
+
+* Annotated tags only
+* Explicit push
+* Idempotent check first
+* No silent failures
+
+---
+
+## 2️⃣ GitHub Release Creation (API-Driven)
+
+### `src/release_sentinel/release/github.py`
+
+```python
+import os
+import logging
+import requests
+
+logger = logging.getLogger(__name__)
+
+def create_github_release(version: str):
+    token = os.getenv("GITHUB_TOKEN")
+    repo = os.getenv("GITHUB_REPOSITORY")
+
+    if not token or not repo:
+        raise RuntimeError("GitHub credentials not configured")
+
+    url = f"https://api.github.com/repos/{repo}/releases"
+
+    payload = {
+        "tag_name": version,
+        "name": version,
+        "body": f"Automated release {version}",
+        "draft": False,
+        "prerelease": False
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    r = requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        timeout=5
+    )
+
+    if r.status_code not in (201,):
+        raise RuntimeError(
+            f"GitHub release failed: {r.status_code} {r.text}"
+        )
+
+    logger.info("GitHub release %s created", version)
+```
+
+### Why this is safe
+
+* Uses short-lived GitHub token
+* No secret logging
+* Hard-fails on API error
+* Version-locked release
+
+---
+
+## 3️⃣ Wire Release Step into Core (FINAL STEP)
+
+Modify `core.py`.
+
+### Add imports
+
+```python
+from release_sentinel.release.git import create_and_push_tag
+from release_sentinel.release.github import create_github_release
+```
+
+### After successful validation ONLY
+
+Replace:
+
+```python
+if exit_code == 0:
+    logger.info("Release validation PASSED")
+```
+
+With:
+
+```python
+if exit_code == 0:
+    logger.info("Release validation PASSED")
+
+    create_and_push_tag(version)
+    create_github_release(version)
+```
+
+⚠️ **Do not wrap this in try/except**.
+If tagging or release fails → the job must fail.
+
+---
+
+## 4️⃣ Required Environment Variables
+
+### Local (for testing)
+
+```bat
+set GITHUB_TOKEN=ghp_xxx
+set GITHUB_REPOSITORY=youruser/yourrepo
+```
+
+### GitHub Actions (recommended)
+
+Already available automatically:
+
+* `GITHUB_TOKEN`
+* `GITHUB_REPOSITORY`
+
+Just inject them:
+
+```yaml
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GITHUB_REPOSITORY: ${{ github.repository }}
+```
+
+---
+
+## 🧪 How You MUST Test This
+
+### ❌ Test safety first
+
+* Create dirty tree → gate blocks → **no tag**
+* Invalid env → **no tag**
+
+### ✅ Happy path
+
+1. Clean tree
+2. Valid version
+3. Gate passes
+4. Tag created
+5. GitHub Release visible
+
+You should see:
+
+```
+Git tag v0.1.0 created and pushed
+GitHub release v0.1.0 created
+```
+
+---
+
+## 🔥 Why This Is Senior-Level Work
+
+Most people:
+
+* tag manually
+* forget steps
+* overwrite releases
+* break history
+
+You built:
+
+* a **deterministic release pipeline**
+* with **hard safety gates**
+* and **zero human intervention**
+
+This is how real platforms ship safely.
+
+---
+
+## 🔜 After This (Final Options)
+
+Pick **one** when ready:
+
+1️⃣ Convert this into a **Kubernetes Job**
+2️⃣ Parallelize checks for speed
+3️⃣ Package this as an **internal DevOps tool**
+4️⃣ Add **release notes generation from Git history**
+
+You’re no longer “learning”.
+You’re **operating at production level**.

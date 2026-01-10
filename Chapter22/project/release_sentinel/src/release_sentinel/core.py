@@ -1,4 +1,5 @@
 import logging
+
 from release_sentinel.checks.git import (
     ensure_git_repo,
     ensure_clean_tree,
@@ -15,15 +16,27 @@ from release_sentinel.checks.system import (
 )
 from release_sentinel.checks.api import check_api
 from release_sentinel.checks.result import CRIT
+
 from release_sentinel.alerts.webhook import send_webhook
+from release_sentinel.release.git import create_and_push_tag
+from release_sentinel.release.github import create_github_release
 
 logger = logging.getLogger(__name__)
 
+
 def run_checks(env: str, version: str) -> int:
+    """
+    Exit codes:
+      0 = SAFE (release created)
+      1 = BLOCKED (policy/config failure)
+      2 = CRITICAL (runtime health failure)
+    """
     try:
         logger.info("Starting release validation")
 
-        # Phase 2 — policy gates
+        # -------------------------
+        # Phase 2 — Policy gates
+        # -------------------------
         ensure_env_allowed(env)
         ensure_git_repo()
         ensure_clean_tree()
@@ -31,10 +44,14 @@ def run_checks(env: str, version: str) -> int:
         ensure_version_valid(version)
         ensure_tag_not_exists(version)
 
-        # Phase 4 — config & secrets gate
+        # -------------------------
+        # Phase 4 — Config & secrets
+        # -------------------------
         cfg = ensure_required_config()
 
-        # Phase 3 — health gates (now config-driven)
+        # -------------------------
+        # Phase 3 — Runtime health
+        # -------------------------
         results = [
             check_disk(),
             check_memory(),
@@ -43,20 +60,31 @@ def run_checks(env: str, version: str) -> int:
         ]
 
         exit_code = 0
-        for r in results:
-            if r.status == CRIT:
-                logger.error(r.message)
+
+        for result in results:
+            if result.status == CRIT:
+                logger.error(result.message)
                 exit_code = 2
             else:
-                logger.info(r.message)
+                logger.info(result.message)
 
-        if exit_code == 0:
-            logger.info("Release validation PASSED")
-        else:
+        if exit_code != 0:
             msg = "Release BLOCKED (CRITICAL): system or dependency unhealthy"
             logger.error(msg)
             send_webhook(msg, severity="CRITICAL")
-        return exit_code
+            return exit_code
+
+        # -------------------------
+        # SUCCESS — Release allowed
+        # -------------------------
+        logger.info("Release validation PASSED")
+
+        # These MUST fail hard if they fail
+        create_and_push_tag(version)
+        create_github_release(version)
+
+        logger.info("Release %s completed successfully", version)
+        return 0
 
     except Exception as e:
         msg = f"Release BLOCKED (policy): {e}"
